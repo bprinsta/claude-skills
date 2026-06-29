@@ -1,0 +1,6 @@
+# Skills kept local-only (contain internal/company material or personal config — not pushed)
+perf-review/
+plans/
+
+# OS / editor cruft
+.DS_Store
