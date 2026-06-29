@@ -1,17 +1,17 @@
 ---
 name: free-disk-space
-description: Diagnose a full or nearly-full disk on macOS and safely reclaim space. Finds the biggest directories/files, distinguishes genuinely reclaimable bytes from APFS-clone illusions, and applies a prioritized, safety-ranked cleanup playbook (git garbage, Docker images, Xcode/iOS caches, node_modules, stale git worktrees, app caches). Use when the user says the disk is full, "almost out of space", "running low on storage", "free up space", "what's taking up space", hits ENOSPC / "no space left on device", or asks to clean up / reclaim disk. Especially tuned for developer machines (large git repos, Xcode, Docker, many worktrees).
+description: Diagnose a full or nearly-full disk on macOS and safely reclaim space. Finds the biggest directories/files, confirms how much each delete actually reclaims (via df, not just du), and applies a prioritized, safety-ranked cleanup playbook (git garbage, Docker images, Xcode/iOS caches, node_modules, stale git worktrees, app caches). Use when the user says the disk is full, "almost out of space", "running low on storage", "free up space", "what's taking up space", hits ENOSPC / "no space left on device", or asks to clean up / reclaim disk. Especially tuned for developer machines (large git repos, Xcode, Docker, many worktrees).
 ---
 
 # Free Disk Space (macOS, developer machines)
 
-Help the user diagnose a full disk and reclaim space **safely**. Work top-down: measure, find the biggest offenders, then delete in order of *safety × payoff*. Always confirm the actual reclaimable bytes — `du` lies on APFS (see below).
+Help the user diagnose a full disk and reclaim space **safely**. Work top-down: measure, find the biggest offenders, then delete in order of *safety × payoff*. Always confirm the actual reclaimed bytes by re-checking `df` after a delete — `du` reports the size of what you targeted, not what you got back.
 
 ## Guiding principles
 
 - **Measure before deleting.** Never delete based on a guess about what's big. Run the scans first.
 - **Safety-rank every target.** Prefer regenerable caches and verified-garbage over anything that could hold unpushed work or user data. When a target could lose work, surface it and ask.
-- **Confirm deletes actually free space.** On APFS, `du` counts logical bytes; cloned/COW files share physical blocks. Deleting a clone frees almost nothing. After a delete, re-check `df` — if used space barely moved, the data was shared or pinned (snapshots).
+- **Confirm deletes actually free space.** After a delete, re-check `df` on the data volume — don't assume the `du` size you saw is what you reclaimed. If used space barely moved, investigate before concluding anything: the most common causes are (1) a *concurrent* delete or write in another terminal/process changing the accounting underneath you, (2) APFS local snapshots pinning the freed blocks until they expire, (3) a large `rm -rf` that hasn't finished yet, or (4) APFS clonefiles sharing physical blocks (real, but verify rather than assume — see lessons). Re-measure; don't guess at the cause.
 - **Never delete what you didn't identify.** If a dir's contents contradict how it was described, stop and report instead of proceeding.
 - **Branches survive worktree removal.** `git worktree remove` deletes only the working directory; the branch and its commits stay in `.git`. This makes worktree cleanup low-risk even for branches with unpushed commits — but uncommitted/untracked changes in the worktree ARE lost.
 
@@ -89,7 +89,7 @@ Docker stores everything in one VM image, `Docker.raw`, under `~/Library/Contain
 
 ### Tier 4 — node_modules and git worktrees (confirm per the user's wishes)
 
-- **node_modules**: huge but trivially regenerable (`npm/pnpm install`). Find them: `find <dir> -type d -name node_modules -prune | xargs -I{} du -sh {} | sort -rh`. Caveat: if they were created by cloning a repo dir (some worktree tools use APFS clones), deleting them frees little real space — verify with `df`.
+- **node_modules**: huge but trivially regenerable (`npm/pnpm install`). Find them: `find <dir> -type d -name node_modules -prune | xargs -I{} du -sh {} | sort -rh`. As always, confirm the real reclaim with `df` after deleting.
 - **Stale git worktrees**: a repo can accumulate many. List with `git -C <repo> worktree list`. For each, gather decision info:
 
   ```bash
@@ -115,7 +115,7 @@ After each major delete, re-run `df -h /System/Volumes/Data` and report the befo
 
 ## Hard-won lessons (don't relearn these)
 
-- **`du` over-counts APFS clones.** A 65G dir of cloned files may free almost nothing when deleted. Trust `df` deltas, not `du` totals, for "how much did I actually reclaim."
+- **`du` size ≠ reclaimed bytes — measure with `df`, and don't guess at the cause of a shortfall.** If a delete frees far less than its `du` size, resist the urge to invent an explanation. In one session a 65G `~/conductor` delete appeared to free almost nothing; the tidy theory was "APFS clonefiles share blocks" — but the real cause was a *concurrent* `rm -rf` running in another terminal that had already been clearing it. APFS clonefiles, snapshots, and unfinished deletes are all real and can produce this symptom, so the discipline is: re-measure, check `tmutil listlocalsnapshots /` and for other running deletes, and only claim a cause you actually verified. (To check clone/COW status of a file, tools like `diskutil` info or `clonefile`-aware utilities are needed — a plain `du`/`df` comparison alone does **not** prove cloning.)
 - **A full disk is self-perpetuating via git.** Auto-gc fails → leaves a multi-GB temp pack → disk fuller → next gc fails. Purging `tmp_pack_*` garbage breaks the cycle and is the highest-payoff safe win on a developer machine.
 - **`git gc --auto` won't save you** — it's deliberately conservative and leaves garbage. Use explicit `git gc --prune=now`, or just delete the verified `tmp_*` garbage directly.
 - **ENOSPC can brick your own tooling.** If you can't even write a temp file, hand the user a `! rm -rf ...` command for a known-large, known-safe dir to free the first few GB.
