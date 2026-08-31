@@ -34,19 +34,26 @@ diskutil info /System/Volumes/Data | grep -iE "free|purgeable"
 
 ## Step 2 — Find the biggest directories
 
-Top-level home scan (slow on a full disk; run in background and wait):
+**Check for `dust` first — prefer it over `du` whenever it's installed** (`command -v dust`). It walks in parallel and returns in seconds where `du` takes many minutes; on one developer machine `du -sh ~/Library/... ~/dev ...` was killed by a **10-minute timeout**, while `dust` scanned the whole home dir in well under that. It also prints a size-sorted tree with percentage bars, so one call replaces `du | sort -rh | head`.
+
+```bash
+dust -d 1 -n 25 -r ~          # depth 1, top 25, reverse (biggest first)
+dust -d 2 -n 20 -r ~/Library  # drill down a level
+dust -d 0 <path>              # single total, e.g. one sim or one big file
+```
+
+Flags worth knowing: `-d` max depth, `-n` number of lines, `-r` biggest-first, `-s` apparent size (default is real disk blocks — which is what you want, and why `dust` reports sparse files correctly). Even with `dust`, still scan a huge home dir in the background and read the output file.
+
+Fallback when `dust` isn't installed (slow on a full disk; run in background and wait):
 
 ```bash
 du -sh ~/* 2>/dev/null | sort -rh | head -25
-```
-
-Then drill into the winners. Common heavy spots to check directly (faster than a full walk):
-
-```bash
 du -sh ~/Library/Developer ~/Library/Containers ~/Library/Caches ~/Library/Application\ Support 2>/dev/null | sort -rh
 ```
 
-For code dirs, the usual culprits are `.git`, `node_modules`, build output, and `.claude`/`.codex` worktrees. Drill with `du -sh <dir>/* <dir>/.[!.]* | sort -rh`.
+For code dirs, the usual culprits are `.git`, `node_modules`, build output, and `.claude`/`.codex` worktrees. Drill with `dust -d 1 -r <dir>` (or `du -sh <dir>/* <dir>/.[!.]* | sort -rh`).
+
+**Sparse files need `du`/`dust`, not `ls`.** `ls -lh` shows *apparent* size, which wildly overstates VM images: `Docker.raw` listed as 100G held only 36G of real blocks. Always confirm with `du -h <file>` (or `dust -d 0`) before quoting a number or estimating a win.
 
 ## Step 3 — The safety-ranked cleanup playbook
 
@@ -77,8 +84,12 @@ git -C <repo> count-objects -vH | grep -E "packs|size-pack|garbage|size-garbage"
   find <repo>/.git/objects \( -name "tmp_pack_*" -o -name "tmp_idx_*" -o -name "tmp_obj_*" \) -delete
   ```
 
-- **Thousands of packs** (`packs: 2429`): an auto-gc never completed. Run a real `git gc --prune=now` (NOT just `--auto`, which is conservative and leaves garbage). Check first that an auto-gc isn't already holding the lock (`.git/gc.pid`); if `git gc` says "gc is already running", verify that pid is actually alive with `ps -p <pid>` — a dead pid means a stale lock.
-- `git gc` needs temp headroom (it builds a new pack before deleting old) — make sure there's enough free space first.
+- **Thousands of packs** (`packs: 2429`): before fighting this, check `ls .git/objects/pack/*.promisor | wc -l` and `git config remote.origin.partialclonefilter`. In a **partial clone** (`blob:none`), nearly all packs are usually *promisor packs* — one per on-demand blob fetch — and `git repack -a -d` by design does not touch them (it packs only non-promisor objects), so the count is unfixable by gc/repack and only ratchets up. A 2-hour `repack -a -d` in one session reclaimed 9G of redundancy but reduced 3,173 packs to 3,172. Do NOT try `multi-pack-index repack --batch-size=0` to force it: the consolidated pack loses its `.promisor` marking, which partial-clone fsck/connectivity checks depend on. What IS worth doing: `git multi-pack-index write` (cheap, safe) so lookups across thousands of packs stay fast. Pack *count* is a perf nuisance, not a disk hog — the disk win is the `tmp_pack_*` garbage, not consolidation.
+  - In a non-partial clone, thousands of packs usually mean background maintenance only ever runs *incremental* repack (`repack -d -l --cruft`, no `-a`) — there a full `repack -a -d` genuinely consolidates.
+  - Don't race for the gc lock. On a busy dev machine every git client queues its own auto-gc, each holding `.git/gc.pid` for ~30 min; launching `git gc` between them loses repeatedly (three consecutive losses in one session). Instead run **`git repack -a -d`** directly — it consolidates non-promisor packs (see above for the partial-clone limit) and does NOT take the gc lock, so it can't lose the race. Queue it behind any currently-running gc pid (`while ps -p <pid>; do sleep 30; done; git repack -a -d ...`) to avoid two pack-objects fighting for I/O — and before launching a repack yourself, `pgrep -fl "repack -a"` first: in one session a queued waiter had already fired and a second identical repack got started on top of it.
+  - If `git gc` says "gc is already running", verify the pid with `ps -p <pid>` — a dead pid means a stale lock; a live one means wait or use the repack route.
+  - Check for consolidation blockers first: `ls .git/objects/pack/*.keep` (kept packs are exempt) and `git config --get-regexp "gc\.|repack\."`.
+- `git gc`/`repack -a` needs temp headroom (it builds the new pack before deleting old ones — used space temporarily RISES by up to the full pack size) — make sure there's enough free space first.
 
 ### Tier 3 — Docker (often the single biggest item)
 
@@ -102,11 +113,22 @@ Docker stores everything in one VM image, `Docker.raw`, under `~/Library/Contain
   done
   ```
 
-  Present this table and let the user choose what to keep. Remove with `git worktree remove --force <dir>`; locked worktrees need `-f -f` (verify the locking pid is dead first). Run `git worktree prune -v` afterward to clear stale admin refs (e.g. for worktrees whose dirs were deleted manually). Remember: **removing a worktree keeps its branch/commits** — only uncommitted/untracked changes are lost. Separate *clones* (a `.git` directory, not a `.git` file) aren't worktrees — `rm -rf` them directly, but their uncommitted work is gone.
+  Present this table and let the user choose what to keep. Remove with `git worktree remove --force <dir>`; locked worktrees need `-f -f` (verify the locking pid is dead first). Run `git worktree prune -v` afterward to clear stale admin refs (e.g. for worktrees whose dirs were deleted manually). Remember: **removing a worktree keeps its branch/commits** — only uncommitted/untracked changes are lost (worktrees share the main repo's object store, so even unpushed *committed* work survives removal). Separate *clones* (a `.git` directory, not a `.git` file) aren't worktrees — check `git log --branches --not --remotes` for unpushed commits, then `rm -rf` them directly; their uncommitted work is gone.
+
+  **`git worktree list` is not exhaustive.** Also `du` the known worktree *parent* dirs (`~/.codex/worktrees/*`, `~/.claude/*`, `/private/tmp/<repo>-*`, `~/conductor/*`) — they accumulate things git no longer tracks: standalone clones, and orphaned backups where tooling renamed a worktree aside (e.g. `*.recut-backup`), which breaks the gitdir link so `git worktree prune` drops the admin entry and the dir becomes invisible to git. In one session three such backups held 79G. `git worktree remove` on these fails with "is not a working tree" — inspect (`.git` file vs dir, does the gitdir target exist, unpushed commits) and `rm -rf` once verified.
+
+  **"In use" checks lie two ways.** `lsof +d <dir>` often shows a `git fsmonitor--daemon` (ppid=1) holding the dir — that's a harmless per-repo file watcher, not a user session; don't let it block removal. And your *own* background scan loops (`git status` per worktree) show up as "in use" on whatever dir they're currently scanning. Always `ps -p <pid> -o command` before treating a holder as real.
+
+  **Ephemeral agent scratch checkouts** (`/private/tmp/<repo>-pr-*-review*`, `-explain*` and similar) are disposable by design: detached HEAD, and their dirty files are agent artifacts. Remove any not touched in the last few hours; verify nothing real is using the recent ones first.
+
+  **Rescue unpushed commits from standalone clones before deleting.** A clean (`dirty=0`) clone can still hold committed-but-unpushed work — always check `git log --branches --not --remotes --oneline`. To save it without keeping the multi-GB clone, fetch into the main repo: `git -C <main-repo> fetch <clone-path> <branch>:refs/rescued/<name>` — fetch by **branch name**, not raw sha (fetching an arbitrary sha from a local path fails with "couldn't find remote ref"), and verify with `git log -1 refs/rescued/<name>` before deleting. In one session this saved a lone unpushed commit sitting in a 72G clone.
 
 ### Tier 5 — Ask before touching
 
-- **CoreSimulator devices** (`~/Library/Developer/CoreSimulator/Devices`): can be tens of GB. Delete only *unavailable* ones safely: `xcrun simctl delete unavailable`. Active simulators hold real data the user may want.
+- **CoreSimulator devices** (`~/Library/Developer/CoreSimulator/Devices`): can be tens (even 100+) of GB. Delete only *unavailable* ones safely: `xcrun simctl delete unavailable`. Active simulators hold real data (login state) the user may want. List per-device size/name/runtime by reading each device dir's `device.plist` (`plutil -extract name raw`) plus `du`, and check `xcrun simctl list devices | grep Booted` before deleting anything.
+  - **Per-worktree simulator clones**: project tooling may create one sim per git worktree, named `<tool>-<hash>` (in notion-next: `nomo-` + first 8 hex of `sha256` of the *canonicalized* worktree root — `printf '%s' "$(realpath <worktree>)" | shasum -a 256 | cut -c1-8`; see `src/mobile/cli/src/shared/worktree.rs`). These stay "available" after their worktree is deleted, so `simctl delete unavailable` finds nothing. Compute hashes for existing worktrees and delete sims that match none (user-approved rule in that repo: worktree gone → sim deletable). Beware a *different* hash for the same worktree elsewhere (the make log dir uses md5 of path+newline) — verify against the right function before matching.
+  - Sim clones are APFS clonefiles of a template: summed `du` badly overstates reclaim — 51G of `du` freed ~15G of `df` in one session, and 68G across 7 sims freed ~20G in another. Budget roughly a third of the `du` sum, and report the `df` delta, not the `du` sum.
+  - Gate sim deletion on the booted list: run `xcrun simctl list devices | grep Booted` and *act on the result* before issuing deletes — don't just print it in the same batch as the deletes. `simctl delete` happily shuts down and deletes a Booted sim with no warning; a sim can idle Booted for days after its last real use, so booted ≠ in-use, but it's the user's call.
 - **`.claude` / `.codex` session worktrees** inside a repo: stale agent worktrees with their own node_modules. Treat like Tier 4 worktrees.
 
 ## Step 4 — Report
@@ -115,7 +137,17 @@ After each major delete, re-run `df -h /System/Volumes/Data` and report the befo
 
 ## Hard-won lessons (don't relearn these)
 
+- **An agent may be working *right now* — find the live dirs before deleting any worktree.** Don't infer "in use" from directory mtime alone (a dir's mtime only changes when its immediate entries change). Resolve actual working directories from the processes themselves:
+
+  ```bash
+  lsof -a -c codex -c node -c git -c zsh -d cwd -Fn 2>/dev/null | grep ^n | cut -c2- | sort -u
+  ```
+
+  Cross-check against `git worktree list` and per-worktree "last commit" times — a commit timestamped *minutes* ago means a live agent session, even in a dir git calls stale. Two gotchas: a process's cwd can point at an **already-deleted** directory (it still shows in `lsof`, and `realpath` returns empty — which silently produces the sha256 of the empty string, `e3b0c442`, if you feed it to a hash), and a `git status`/`git fsck` child spawned by an agent is transient, so it may exit between your check and your delete. Protect the *repo* dirs, not just the pids.
+
 - **`du` size ≠ reclaimed bytes — measure with `df`, and don't guess at the cause of a shortfall.** If a delete frees far less than its `du` size, resist the urge to invent an explanation. In one session a 65G `~/conductor` delete appeared to free almost nothing; the tidy theory was "APFS clonefiles share blocks" — but the real cause was a *concurrent* `rm -rf` running in another terminal that had already been clearing it. APFS clonefiles, snapshots, and unfinished deletes are all real and can produce this symptom, so the discipline is: re-measure, check `tmutil listlocalsnapshots /` and for other running deletes, and only claim a cause you actually verified. (To check clone/COW status of a file, tools like `diskutil` info or `clonefile`-aware utilities are needed — a plain `du`/`df` comparison alone does **not** prove cloning.)
 - **A full disk is self-perpetuating via git.** Auto-gc fails → leaves a multi-GB temp pack → disk fuller → next gc fails. Purging `tmp_pack_*` garbage breaks the cycle and is the highest-payoff safe win on a developer machine.
 - **`git gc --auto` won't save you** — it's deliberately conservative and leaves garbage. Use explicit `git gc --prune=now`, or just delete the verified `tmp_*` garbage directly.
 - **ENOSPC can brick your own tooling.** If you can't even write a temp file, hand the user a `! rm -rf ...` command for a known-large, known-safe dir to free the first few GB.
+- **Used space can RISE while you're deleting — that's usually a background repack, not a bug.** Xcode's `git maintenance` (and git's own auto-maintenance) keeps re-spawning gc → repack → pack-objects; a cruft repack writes a complete new pack (tens of GB on a monorepo) before deleting old ones. If `df` goes the wrong way mid-cleanup, `pgrep -fl "git gc|git repack|pack-objects"` before inventing another cause. Corollary: once you free real headroom, the previously-failing gc finally *succeeds* and reclaims extra space on its own — don't attribute that windfall to your last delete.
+- **The temp-pack name changes across git operations.** Interrupted-gc garbage is `tmp_pack_*` (flagged by `count-objects` as garbage), but a *live* repack writes `.tmp-<pid>-pack` (dot-prefixed). A `tmp_pack_*` glob won't touch the live one — still, always run the pgrep check first.
