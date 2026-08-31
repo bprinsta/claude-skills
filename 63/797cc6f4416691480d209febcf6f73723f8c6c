@@ -1,0 +1,43 @@
+free-disk-space/SKILL.md
+  s_a219a1800d1565::t_1ec922815bf2d7 116-122
+  s_a219a1800d1565::t_bc2ac9507658b5 131
+  s_a219a1800d1565::t_51786123303489 87-88
+  s_a219a1800d1565::t_2f886db959749e 89
+  s_018505a2580c21::t_63ac769507a29e 130
+  s_a219a1800d1565::t_66c78e75805517 124
+  s_a219a1800d1565::t_5f6b2f34adcf3c 128-129
+  s_a219a1800d1565::t_efdf3d98c41975 152-153
+  s_dd7d06cdc910ea::t_8cd9c25d4c2461 37,40-42,45-47,50,54-56,90-92,123,140-147
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "63797cc6f4416691480d209febcf6f73723f8c6c",
+  "prompts": {},
+  "sessions": {
+    "s_018505a2580c21": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ce00044e-9b7c-40bd-843b-47309f8faa2e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ben Musoke-Lubega <bmusokelubega@makenotion.com>"
+    },
+    "s_a219a1800d1565": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2e0cd581-d9b9-47c8-9c1b-7de2e6ce0fee",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Ben Musoke-Lubega <bmusokelubega@makenotion.com>"
+    },
+    "s_dd7d06cdc910ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a058c7-e1f6-70f3-a28b-a908ebf32060",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ben Musoke-Lubega <bmusokelubega@makenotion.com>"
+    }
+  }
+}
