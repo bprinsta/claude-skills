@@ -44,6 +44,8 @@ dust -d 0 <path>              # single total, e.g. one sim or one big file
 
 Flags worth knowing: `-d` max depth, `-n` number of lines, `-r` biggest-first, `-s` apparent size (default is real disk blocks — which is what you want, and why `dust` reports sparse files correctly). Even with `dust`, still scan a huge home dir in the background and read the output file.
 
+Not installed? It's `brew install dust` on macOS (the Homebrew formula is `dust`; the Rust crate is `du-dust` — `cargo install du-dust` — so neither name works with the other tool). **Don't install it mid-emergency**: Homebrew downloads and writes to the disk you're trying to empty, and can fail with ENOSPC when free space is near zero. On a critically-full disk, use the `du` fallback below to free the first few GB, then install `dust` if you want it for the rest of the pass.
+
 Fallback when `dust` isn't installed (slow on a full disk; run in background and wait):
 
 ```bash
